@@ -1,0 +1,116 @@
+name: Deploy Backend to Cloud Run
+
+on:
+  push:
+    branches: ['main']
+    paths:
+      - 'src/**'
+      - 'Dockerfile'
+      - '.dockerignore'
+      - 'pnpm-lock.yaml'
+      - 'package.json'
+      - 'tsconfig*.json'
+      - 'nest-cli.json'
+      - '.github/workflows/deploy-backend.yml'
+
+env:
+  PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  ARTIFACT_REGISTRY_REPO: ${{ secrets.ARTIFACT_REGISTRY_REPO }}
+  ARTIFACT_REGISTRY_LOCATION: ${{ secrets.ARTIFACT_REGISTRY_LOCATION }}
+  CLOUD_RUN_SERVICE: ${{ secrets.CLOUD_RUN_SERVICE }}
+  CLOUD_RUN_REGION: ${{ secrets.CLOUD_RUN_REGION }}
+  IMAGE_NAME: font-system-detector
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Validate required secrets
+        run: |
+          if [ -z "${{ secrets.GCP_PROJECT_ID }}" ]; then
+              echo "::error::GCP_PROJECT_ID secret is not set"
+              exit 1
+          fi
+          if [ -z "${{ secrets.ARTIFACT_REGISTRY_REPO }}" ]; then
+              echo "::error::ARTIFACT_REGISTRY_REPO secret is not set"
+              exit 1
+          fi
+          if [ -z "${{ secrets.ARTIFACT_REGISTRY_LOCATION }}" ]; then
+              echo "::error::ARTIFACT_REGISTRY_LOCATION secret is not set"
+              exit 1
+          fi
+          if [ -z "${{ secrets.CLOUD_RUN_SERVICE }}" ]; then
+              echo "::error::CLOUD_RUN_SERVICE secret is not set"
+              exit 1
+          fi
+          if [ -z "${{ secrets.CLOUD_RUN_REGION }}" ]; then
+              echo "::error::CLOUD_RUN_REGION secret is not set"
+              exit 1
+          fi
+          if [ -z "${{ secrets.GCP_SA_KEY }}" ]; then
+              echo "::error::GCP_SA_KEY secret is not set"
+              exit 1
+          fi
+          echo "✓ All required secrets are set"
+
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: |
+          gcloud auth configure-docker ${{ env.ARTIFACT_REGISTRY_LOCATION }}-docker.pkg.dev --quiet
+
+      - name: Generate image tag
+        id: image-tag
+        run: |
+          SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-7)
+          BRANCH_NAME=$(echo ${{ github.ref_name }} | tr '/' '-')
+          IMAGE_TAG="${{ env.ARTIFACT_REGISTRY_LOCATION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.ARTIFACT_REGISTRY_REPO }}/${{ env.IMAGE_NAME }}:${SHORT_SHA}-${BRANCH_NAME}"
+          LATEST_TAG="${{ env.ARTIFACT_REGISTRY_LOCATION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.ARTIFACT_REGISTRY_REPO }}/${{ env.IMAGE_NAME }}:latest"
+          echo "image=${IMAGE_TAG}" >> $GITHUB_OUTPUT
+          echo "latest=${LATEST_TAG}" >> $GITHUB_OUTPUT
+          echo "Built image tag: ${IMAGE_TAG}"
+
+      - name: Build Docker image
+        run: |
+          docker build \
+            --platform linux/amd64 \
+            -f Dockerfile \
+            -t ${{ steps.image-tag.outputs.image }} \
+            -t ${{ steps.image-tag.outputs.latest }} \
+            .
+
+      - name: Push Docker image to Artifact Registry
+        run: |
+          docker push ${{ steps.image-tag.outputs.image }}
+          docker push ${{ steps.image-tag.outputs.latest }}
+
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy ${{ env.CLOUD_RUN_SERVICE }} \
+            --image ${{ steps.image-tag.outputs.image }} \
+            --region ${{ env.CLOUD_RUN_REGION }} \
+            --platform managed \
+            --set-env-vars GOOGLE_FONTS_API_KEY=${{ secrets.GOOGLE_FONTS_API_KEY }} \
+            --allow-unauthenticated \
+            --quiet
+
+      - name: Show deployment URL
+        run: |
+          SERVICE_URL=$(gcloud run services describe ${{ env.CLOUD_RUN_SERVICE }} \
+            --region ${{ env.CLOUD_RUN_REGION }} \
+            --format 'value(status.url)')
+          echo "Deployed to: $SERVICE_URL"
