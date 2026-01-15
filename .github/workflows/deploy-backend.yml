@@ -2,16 +2,11 @@ name: Deploy Backend to Cloud Run
 
 on:
   push:
-    branches: ['main']
-    paths:
-      - 'src/**'
-      - 'Dockerfile'
-      - '.dockerignore'
-      - 'pnpm-lock.yaml'
-      - 'package.json'
-      - 'tsconfig*.json'
-      - 'nest-cli.json'
-      - '.github/workflows/deploy-backend.yml'
+    branches:
+      - master
+    paths-ignore:
+      - '*.md'
+      - 'docs/**'
 
 env:
   PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
